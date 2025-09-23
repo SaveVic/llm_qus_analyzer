@@ -18,30 +18,44 @@ Before you can start analyzing user stories, you need to configure the settings,
 
 #### Environment Variables
 
-The `LLMClient` requires API keys to communicate with the underlying language model provider. For now it only support Together AI provider. These keys should be stored in a `.env` file in the root directory of your project.
+The `LLMClient` requires API keys to communicate with the underlying language model providers. You can configure multiple providers, and the client will automatically use the appropriate key for each model based on its source.
 
-Create a file named `.env` and add your API key:
+These keys should be stored in a `.env` file in the root directory of your project.
+
+Create a file named `.env` and add your API keys:
 
 ```
-TOGETHER_API_KEY="your_api_key_here"
+TOGETHER_API_KEY="your_together_api_key_here"
+OPENAI_API_KEY="your_openai_api_key_here" 
+DEEPSEEK_API_KEY="your_deepseek_api_key_here"
 ```
+
+Note: You only need to include the API keys for the providers you're actually using.
 
 #### Model Configuration
 
 The package uses a YAML file to define the configurations for the different LLMs you might want to use. This allows you to easily switch between models or update their settings without changing your code.
 
-Create a file named `models.yaml` or anything you preffered with the following structure:
+The `source` field specifies which provider the model comes from. Supported sources are:
+- `together` for Together AI models
+- `chatgpt` for OpenAI ChatGPT models  
+- `deepseek` for DeepSeek models
+
+Create a file named `models.yaml` with the following structure:
 
 ```yaml
 models:
   - id: "deepseek-ai/DeepSeek-V3"
     name: "DeepSeek V3 Chat"
+    source: "deepseek"
 
   - id: "meta-llama/Llama-3.3-70B-Instruct-Turbo"
     name: "Llama 3.3 70B"
+    source: "together"
 
-  - id: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-    name: "Llama 4 Maverick Instruct"
+  - id: "gpt-4o-mini"
+    name: "GPT-4o Mini"
+    source: "chatgpt"
 ```
 
 #### Loading Settings in Code
@@ -122,71 +136,26 @@ Now you can get each component, template, and LLM usage.
 78
 ```
 
-```bash
- Client Setup (Required First)
-  from llm_qus_analyzer.client import LLMClient
+#### Batch Processing Multiple Stories
 
-  # Initialize the LLM client
-  client = LLMClient()
-  model_idx = 0  # Which LLM model to use
+For processing multiple user stories at once, use the `analyze_list` method:
 
-  2. Component Preparation
-  from llm_qus_analyzer.chunker.models import QUSComponent
+```py
+# List of user stories to analyze
+user_stories = [
+    "As a manager, I want to understand progress so I can report results.",
+    "As a user, I want to login so I can access my account.",
+    "As an admin, I want to manage users so I can control access."
+]
 
-  # Your user stories as QUSComponent objects
-  component1 = QUSComponent(role="user", means="login", ends="access account", text="As a
-  user...")
-  component2 = QUSComponent(role="admin", means="delete", ends="remove data", text="As an
-  admin...")
+# Process all stories with one API call
+results = chunker.analyze_list(client, model_idx, user_stories)
 
-  3. Analysis Execution
-
-  For Individual Analysis:
-  # Analyze single user story
-  violations, usage = ConceptuallyAnalyzer.run(client, model_idx, component1)
-
-  For Set Analysis (Pairwise):
-  # Compare two user stories
-  violations, usage = UniqueAnalyzer.analyze_pairwise(client, model_idx, component1, component2)
-
-  For Set Analysis (Full Set):
-  # Analyze entire set at once
-  components = [component1, component2, component3]
-  violations, usage = UniqueAnalyzer.analyze_full_set(client, model_idx, components)
-```
-
-<!-- Please revise this ! thank you  -->
-
-```bash
-Set Pattern:
-
-# Pairwise
-violations, usage = Analyzer.run(client, model_idx, comp1, comp2, mode="pairwise")
-
-# Fullset
-violations, usage = Analyzer.run(client, model_idx, components, mode="fullset")
-
-Complete Usage Example:
-
-from llm_qus_analyzer.client import LLMClient
-from llm_qus_analyzer.individual import ConceptuallyAnalyzer
-from llm_qus_analyzer.set import ConflictFreeAnalyzer, UniqueAnalyzer
-
-# Setup
-client = LLMClient()
-stories = [component1, component2, component3]
-
-# Individual analysis
-for i, story in enumerate(stories):
-    violations, usage = ConceptuallyAnalyzer.run(client, 0, story)
-    print(f"Story {i}: {len(violations)} violations")
-
-# Set analysis - Pairwise
-violations, usage = ConflictFreeAnalyzer.run(client, 0, stories[0], stories[1],
-mode="pairwise")
-print(f"Conflict check: {len(violations)} conflicts")
-
-# Set analysis - Fullset
-violations, usage = UniqueAnalyzer.run(client, 0, stories, mode="fullset")
-print(f"Uniqueness check: {len(violations)} duplicates")
+# Results is a list of (component, usage) tuples
+for component, usage in results:
+    print(f"Role: {component.role}")
+    print(f"Means: {component.means}")
+    print(f"Ends: {component.ends}")
+    print(f"Tokens used: {usage.total_tokens}")
+    print("---")
 ```

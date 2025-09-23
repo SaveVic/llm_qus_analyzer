@@ -2,10 +2,8 @@ import json
 from typing import Any, Callable, Generic, TypeVar
 from langchain_core.prompts import ChatPromptTemplate
 from .client import LLMClient, LLMUsage
-
 T = TypeVar("T")
-
-
+system = "You are an expert in evaluating user stories according to the Quality User Story (QUS) framework."
 class LLMAnalyzer(Generic[T]):
     """A generic analyzer for processing and evaluating content using LLMs.
 
@@ -37,7 +35,7 @@ class LLMAnalyzer(Generic[T]):
             [
                 (
                     "system",
-                    "You are an expert in evaluating user stories according to the Quality User Story (QUS) framework.",
+                    system
                 ),
                 ("user", f"{definition}\n\n{in_format}\n\n{out_format}"),
             ]
@@ -51,6 +49,27 @@ class LLMAnalyzer(Generic[T]):
                 from the LLM and returns a parsed result of type T.
         """
         self.__parser = parser
+    # nyari ini utk pre built dengan bukan instance tp file
+    def _extract_json(self, content: str) -> str:
+        """Extract JSON from LLM response, handling markdown and extra text."""
+        import re
+        # Remove markdown code blocks
+        content = re.sub(r'```json\s*', '', content)
+        content = re.sub(r'```\s*', '', content)
+        # Find JSON object boundaries
+        brace_count = 0
+        start_idx = -1
+        for i, char in enumerate(content):
+            if char == '{':
+                if start_idx == -1:
+                    start_idx = i
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0 and start_idx != -1:
+                    return content[start_idx:i+1]
+        # Fallback: return cleaned content if no proper JSON found
+        return content.strip()
 
     def run(
         self, client: LLMClient, model_idx: int, values: dict
@@ -85,6 +104,6 @@ class LLMAnalyzer(Generic[T]):
             )
         client.inject_prompt(self.__key, self.__prompt)
         raw_result = client.run(values, [model_idx])[model_idx]
-        raw_json = raw_result.content.replace("```", "").replace("json\n", "")
+        raw_json = self._extract_json(raw_result.content)
         parsed_result = self.__parser(json.loads(raw_json))
         return parsed_result, raw_result.usage

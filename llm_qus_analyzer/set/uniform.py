@@ -77,23 +77,41 @@ class UniformAnalyzer:
             optional (bool): Whether the component is optional (default: False)
 
         Returns:
-            float: Distance penalty (1.0 if required component missing, 
-                   otherwise POS distance between components)
+            float: Distance penalty based on proper separation:
+                   - ROLE and MEANS are mandatory and must exist separately
+                   - ENDS is optional but when present should be in separate template
         """
         dist = 0.0
-        if token not in temp1.chunk or token not in temp2.chunk:
-            if not optional:
-                sep1 = temp1.chunk.get(token, [])
-                sep2 = temp2.chunk.get(token, [])
-                if len(sep1) == 0 and len(sep2) == 0:
-                    dist = 1  # Both missing gets full penalty
-                else:
-                    dist = cls.__pos_distance(sep1, sep2)  # Partial penalty
-            # Clean up for subsequent comparisons
+        sep1 = temp1.chunk.get(token, [])
+        sep2 = temp2.chunk.get(token, [])
+        
+        # Ensure proper component separation in templates
+        if token == '[ENDS]':
+            # ENDS is optional but should be consistently present or absent
+            if len(sep1) == 0 and len(sep2) == 0:
+                dist = 0.0  # Both empty is fine
+            elif len(sep1) == 0 or len(sep2) == 0:
+                # One has ENDS, other doesn't - minor penalty for inconsistency
+                dist = 0.5
+            else:
+                # Both have ENDS, compare template patterns
+                dist = cls.__pos_distance(sep1, sep2)
+        else:
+            # ROLE and MEANS must be present and properly separated
+            if len(sep1) == 0 or len(sep2) == 0:
+                # Missing mandatory component gets full penalty
+                dist = 2.0
+            else:
+                # Compare template patterns for proper separation
+                dist = cls.__pos_distance(sep1, sep2)
+            
+        # Clean up for subsequent comparisons
+        if token in temp1.chunk:
             temp1.chunk.pop(token, None)
+        if token in temp2.chunk:
             temp2.chunk.pop(token, None)
-            temp1.order = [t for t in temp1.order if t != token]
-            temp2.order = [t for t in temp2.order if t != token]
+        temp1.order = [t for t in temp1.order if t != token]
+        temp2.order = [t for t in temp2.order if t != token]
         return dist
 
     @classmethod
@@ -114,7 +132,7 @@ class UniformAnalyzer:
 
     @classmethod
     def __order_handling(cls, temp1: Template, temp2: Template, token: str, optional: bool = False) -> float:
-        """Calculates distance penalty for component order mismatches.
+        """Calculates distance penalty for component order mismatches with proper separation.
 
         Args:
             temp1 (Template): First template to compare
@@ -123,25 +141,47 @@ class UniformAnalyzer:
             optional (bool): Whether the component is optional
 
         Returns:
-            float: Combined distance from POS difference and order mismatch
+            float: Combined distance from POS difference and order mismatch,
+                   emphasizing proper role/means/ends template separation
         """
         idx1 = cls.__get_index(temp1.order, token)
         idx2 = cls.__get_index(temp2.order, token)
         chunk1 = temp1.chunk.get(token, [])
         chunk2 = temp2.chunk.get(token, [])
-        dist = cls.__pos_distance(chunk1, chunk2)
-
-        # Add order mismatch penalty
-        if idx1 != idx2:
-            w1 = sum([(cls.__PUNCT_WEIGHT if c == cls.__PUNCT else 1)
-                     for c in chunk1])
-            w2 = sum([(cls.__PUNCT_WEIGHT if c == cls.__PUNCT else 1)
-                     for c in chunk2])
-            dist += max(w1, w2)
-
-        # Add existence penalty if required
-        if not optional and (token not in temp1.chunk or token not in temp2.chunk):
-            dist += 1
+        dist = 0.0
+        # Ensure components exist separately in templates
+        if token == '[ENDS]':
+            # ENDS is optional but should be consistently handled
+            if len(chunk1) == 0 and len(chunk2) == 0:
+                dist = 0.0  # Both templates don't have ENDS
+            elif len(chunk1) == 0 or len(chunk2) == 0:
+                # One template has ENDS, other doesn't - consistency penalty
+                dist = 0.3
+            else:
+                # Both have ENDS templates, compare patterns
+                dist = cls.__pos_distance(chunk1, chunk2)
+        else:
+            # ROLE and MEANS must exist separately in templates
+            if len(chunk1) == 0 or len(chunk2) == 0:
+                # Missing component in template structure
+                dist = 3.0  # Heavy penalty for missing mandatory components
+            else:
+                # Compare template patterns for proper separation
+                dist = cls.__pos_distance(chunk1, chunk2)
+        # Enforce proper component order in templates (ROLE -> MEANS -> ENDS)
+        if idx1 is not None and idx2 is not None:
+            if idx1 != idx2:
+                # Order mismatch penalty - templates should have consistent structure
+                w1 = sum([(cls.__PUNCT_WEIGHT if c == cls.__PUNCT else 1) for c in chunk1])
+                w2 = sum([(cls.__PUNCT_WEIGHT if c == cls.__PUNCT else 1) for c in chunk2])
+                dist += max(w1, w2) * 0.8  # Order consistency penalty
+            # Ensure proper separation: ROLE should come before MEANS, MEANS before ENDS
+            if token == '[ROLE]' and idx1 != 0:
+                dist += 1.0  # ROLE should be first in template
+            elif token == '[MEANS]' and idx1 <= 0:
+                dist += 1.0  # MEANS should come after ROLE
+            elif token == '[ENDS]' and idx1 <= 1:
+                dist += 0.5  # ENDS should come after MEANS (if present)
 
         return dist
 
@@ -163,11 +203,9 @@ class UniformAnalyzer:
         total_distance = 0.0
         _temp1 = deepcopy(temp1)
         _temp2 = deepcopy(temp2)
-
         # Penalize tail mismatch
         if temp1.tail or temp2.tail:
             total_distance += 1
-
         # Check component existence
         total_distance += cls.__existence_handling(_temp1, _temp2, '[ROLE]')
         total_distance += cls.__existence_handling(_temp1, _temp2, '[MEANS]')
@@ -183,46 +221,116 @@ class UniformAnalyzer:
         return total_distance
 
     @classmethod
-    def __find_top_template(cls, templates: list[Template]) -> int:
-        """Identifies the most representative template.
-
+    def __find_most_common_separators(cls, templates: list[Template]) -> tuple[list[str], list[str], list[str]]:
+        """Finds most common role, means, and ends separators following chunker logic.
+        
         Args:
             templates (list[Template]): List of templates to analyze
-
+            
         Returns:
-            int: Index of template with minimal total distance to others
+            tuple: (most_common_role_seps, most_common_means_seps, most_common_ends_seps)
         """
-        data: list[tuple[int, float]] = []
-        for i, tmp1 in enumerate(templates):
-            total = sum([cls.__template_distance(tmp1, tmp2)
-                        for tmp2 in templates])
-            data.append((i, total))
-        return min(data, key=lambda d: d[1])[0]
+        from collections import Counter
+        role_counter = Counter()
+        means_counter = Counter()
+        ends_counter = Counter()
+        for template in templates:
+            # Extract role separators
+            role_chunk = template.chunk.get('[ROLE]', [])
+            if role_chunk:
+                role_sep = ' '.join(role_chunk).lower()
+                role_counter[role_sep] += 1
+                
+            # Extract means separators  
+            means_chunk = template.chunk.get('[MEANS]', [])
+            if means_chunk:
+                means_sep = ' '.join(means_chunk).lower()
+                means_counter[means_sep] += 1
+                
+            # Extract ends separators
+            ends_chunk = template.chunk.get('[ENDS]', [])
+            if ends_chunk:
+                ends_sep = ' '.join(ends_chunk).lower()
+                ends_counter[ends_sep] += 1
+        
+        # Get most common separators
+        most_common_role = role_counter.most_common(1)[0][0] if role_counter else ''
+        most_common_means = means_counter.most_common(1)[0][0] if means_counter else ''
+        
+        # For ENDS, find most common non-empty separator (like original logic)
+        most_common_ends = ''
+        for sep, _ in ends_counter.most_common():
+            if sep.strip():  # Skip empty separators
+                most_common_ends = sep
+                break
+                
+        return [most_common_role], [most_common_means], [most_common_ends]
+
+    @classmethod
+    def __find_most_common_template_text(cls, templates: list[Template]) -> str:
+        """Finds the most common template text structure.
+        
+        Args:
+            templates (list[Template]): List of templates to analyze
+            
+        Returns:
+            str: Most common template text pattern
+        """
+        from collections import Counter
+        template_counter = Counter()
+        
+        for template in templates:
+            template_counter[template.text] += 1
+        
+        if template_counter:
+            return template_counter.most_common(1)[0][0]
+        return ""
 
     @classmethod
     def __generate_violation_data(cls, text_template: str, component: QUSComponent) -> Violation:
-        """Generates violation details for template deviations.
+        """Generates violation details for template deviations with proper component separation.
 
         Args:
             text_template (str): The expected template pattern
             component (QUSComponent): The deviating user story component
 
         Returns:
-            Violation: Structured suggestion for template alignment
+            Violation: Structured suggestion for template alignment with separated components
         """
-        role = ' or '.join(component.role) or '[ROLE]'
-        means = component.means or '[MEANS]'
-        ends = component.ends or '[ENDS]'
-
+        # Extract components ensuring proper separation
+        role_part = ' or '.join(component.role) if component.role else '[ROLE_MISSING]'
+        means_part = component.means if component.means else '[MEANS_MISSING]'
+        ends_part = component.ends if component.ends else '[ENDS_OPTIONAL]'
+        
+        # Create template suggestion with proper component separation
+        template_parts = []
+        if '[ROLE]' in text_template:
+            template_parts.append(f"As a {role_part}")
+        if '[MEANS]' in text_template:
+            template_parts.append(f"I want {means_part}")
+        if '[ENDS]' in text_template and ends_part != '[ENDS_OPTIONAL]':
+            template_parts.append(f"so that {ends_part}")
+        
+        suggested_format = ', '.join(template_parts)
+        
+        # Identify specific issues with component separation
+        issues = []
+        if not component.role:
+            issues.append("missing ROLE component")
+        if not component.means:
+            issues.append("missing MEANS component")
+        
+        issue_description = "Template structure issues: " + ", ".join(issues) if issues else f"User story doesn't follow the common template pattern: \"{text_template}\""
+        
         return Violation(
-            parts={'template'},
-            issue=f"User story doesn't match the frequent template: \"{text_template}\"",
-            suggestion=f'Consider reformatting to: "{text_template.format(ROLE=role, MEANS=means, ENDS=ends)}"'
+            parts={'template', 'role', 'means', 'ends'},
+            issue=issue_description,
+            suggestion=f'Consider reformatting with proper component separation: "{suggested_format}"'
         )
 
     @classmethod
     def run(cls, client: LLMClient, model_idx: int, components: list[QUSComponent]) -> list[tuple[list[Violation], dict[str, LLMUsage]]]:
-        """Analyzes user stories for template uniformity.
+        """Analyzes user stories for template uniformity following original chunker logic.
 
         Args:
             client (LLMClient): LLM client (unused, maintained for interface consistency)
@@ -233,20 +341,70 @@ class UniformAnalyzer:
             List of (violations, usage) tuples for each input component
 
         Note:
-            - Identifies the most common template pattern
-            - Flags stories deviating beyond __THRESHOLD
-            - Returns empty violations for compliant stories
+            - Finds most common ROLE and MEANS separators (collected together)
+            - ENDS is handled separately (optional, allows empty)
+            - Follows original chunker _uniform() logic
         """
         templates = [comp.template for comp in components]
         if not templates:
             return [([], {}) for _ in components]
-
-        top_idx = cls.__find_top_template(templates)
-        top_template = templates[top_idx]
-
-        return [
-            ([cls.__generate_violation_data(top_template.text, components[i])], {})
-            if cls.__template_distance(top_template, comp.template) > cls.__THRESHOLD
-            else ([], {})
-            for i, comp in enumerate(components)
-        ]
+        common_role_seps, common_means_seps, common_ends_seps = cls.__find_most_common_separators(templates)
+        most_common_template_text = cls.__find_most_common_template_text(templates)
+        
+        results = []
+        for comp in components:
+            template = comp.template
+            violations = []
+            
+            # Extract current component's separators
+            role_chunk = template.chunk.get('[ROLE]', [])
+            means_chunk = template.chunk.get('[MEANS]', [])
+            ends_chunk = template.chunk.get('[ENDS]', [])
+            
+            current_role_sep = ' '.join(role_chunk).lower() if role_chunk else ''
+            current_means_sep = ' '.join(means_chunk).lower() if means_chunk else ''
+            current_ends_sep = ' '.join(ends_chunk).lower() if ends_chunk else ''
+            
+            # Check uniformity following original logic
+            role_ok = False
+            means_ok = False
+            ends_ok = True  # ENDS is optional by default
+            
+            # ROLE check: flexible matching (startswith both ways)
+            if common_role_seps and common_role_seps[0]:
+                expected_role = common_role_seps[0]
+                role_ok = (current_role_sep.startswith(expected_role) or 
+                          expected_role.startswith(current_role_sep))
+            
+            # MEANS check: strict prefix matching
+            if common_means_seps and common_means_seps[0]:
+                expected_means = common_means_seps[0]
+                means_ok = current_means_sep.startswith(expected_means)
+            
+            # ENDS check: empty is allowed, otherwise must match
+            if current_ends_sep == '':
+                ends_ok = True  # Empty ends is always okay
+            elif common_ends_seps and common_ends_seps[0]:
+                expected_ends = common_ends_seps[0]
+                ends_ok = current_ends_sep.startswith(expected_ends)
+            
+            # Generate violation if any component doesn't match
+            if not (role_ok and means_ok and ends_ok):
+                # Use actual template text, handle optional ENDS
+                expected_template = most_common_template_text
+                
+                # If current story has no ENDS but template includes ENDS, strip ENDS part
+                if not comp.ends and "{ENDS}" in expected_template:
+                    # Remove ENDS and trailing connectors (so that, in order to, etc.)
+                    ends_patterns = [" so that {ENDS}", " in order to {ENDS}", " to {ENDS}", ", {ENDS}"]
+                    for pattern in ends_patterns:
+                        if pattern in expected_template:
+                            expected_template = expected_template.replace(pattern, "")
+                            break
+                
+                violation = cls.__generate_violation_data(expected_template, comp)
+                violations.append(violation)
+            
+            results.append((violations, {}))
+        
+        return results

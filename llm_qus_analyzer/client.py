@@ -5,8 +5,14 @@ from .settings import Settings
 from langchain_together import ChatTogether
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage
+from langchain_openai import ChatOpenAI
+from langchain_deepseek import ChatDeepSeek
 
-
+_model_inst={
+    "together":ChatTogether,
+    "chatgpt":ChatOpenAI,
+    "deepseek":ChatDeepSeek
+}
 @dataclass
 class LLMUsage:
     duration: float
@@ -70,7 +76,6 @@ class LLMResult:
         )
         return LLMResult(content=message.content, usage=usage)
 
-
 class LLMClient:
     """Client for interacting with multiple LLM models with prompt management."""
 
@@ -83,13 +88,14 @@ class LLMClient:
         """
         used_config = deepcopy(from_settings.config) if from_settings else Settings()
         self.__models = [
-            ChatTogether(
+            _model_inst[model.source](
                 model=model.id,
                 temperature=0,
                 max_tokens=None,
-                together_api_key=used_config.api_key,
+                seed=42
             )
             for model in used_config.llm_models
+            if model.source in _model_inst
         ]
         self.names = [model.name for model in used_config.llm_models]
         """Names of the available LLM models."""

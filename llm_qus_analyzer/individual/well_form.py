@@ -13,7 +13,7 @@ class WellFormAnalyzer:
     """
 
     @classmethod
-    def __is_have_role(cls, component: QUSComponent) -> Optional[Violation]:
+    def __does_have_role(cls, component: QUSComponent) -> Optional[Violation]:
         """Checks if the user story contains a valid Role component.
 
         Args:
@@ -38,7 +38,7 @@ class WellFormAnalyzer:
         return None
 
     @classmethod
-    def __is_have_means(cls, component: QUSComponent) -> Optional[Violation]:
+    def __does_have_means(cls, component: QUSComponent) -> Optional[Violation]:
         """Checks if the user story contains a valid Means component.
 
         Args:
@@ -87,8 +87,8 @@ class WellFormAnalyzer:
             future extensibility and interface consistency with other analyzers.
         """
         basic_checker = [
-            cls.__is_have_role,
-            cls.__is_have_means,
+            cls.__does_have_role,
+            cls.__does_have_means,
         ]
 
         violations = analyze_individual_with_basic(basic_checker, component)

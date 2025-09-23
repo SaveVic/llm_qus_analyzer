@@ -73,17 +73,14 @@ class TemplateParser:
     This class provides methods to identify and replace common patterns (roles, means, ends)
     in user stories with standardized tokens, helping to create templates from concrete examples.
     """
-
     __reserve_pos = ["[ROLE]", "[MEANS]", "[ENDS]"]
     """Special POS tags for components"""
-
     __valid_chars = ["."]
     """Allowed non-alphanumeric characters"""
 
     @classmethod
     def prepare(cls) -> None:
         """Downloads and initializes the Stanza NLP processor.
-
         Note:
             This should be called once before any parsing operations.
         """
@@ -350,7 +347,7 @@ class TemplateParser:
         # Role
         if len(role) > 0:
             role_str = " ".join(role)
-            role_words = cls.__tokenize(role_str, False)
+            role_words = cls.__tokenize(role_str, True)
             start, end = cls.__lcs(text_words, role_words)
             text_words = cls.__refine_list(text_words, "ROLE", start, end)
 

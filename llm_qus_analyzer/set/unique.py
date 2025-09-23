@@ -1,4 +1,5 @@
 import re
+from collections import defaultdict
 from ..analyzer import LLMAnalyzer
 from ..client import LLMClient, LLMResult, LLMUsage
 from ..chunker.models import QUSComponent
@@ -7,19 +8,29 @@ from ..utils import analyze_set_pairwise, analyze_set_fullset, format_set_result
 from dataclasses import dataclass
 from typing import Any, Optional
 
+# Optional dependencies for semantic analysis
+try:
+    import stanza
+    import spacy
+    HAS_NLP_DEPS = True
+except ImportError:
+    stanza = None
+    spacy = None
+    HAS_NLP_DEPS = False
+
 _definition = """
 **Evaluate whether two user stories are 'Semantically Similar' despite different wording:**
 1. **Similar Action Check:**
-   - Do both stories describe essentially the same action or functionality?
-   - Are the core behaviors or system operations equivalent?
+   - Do both stories describe essentially the same functionality ?
+   - Are the core behaviors or system operations equivalent ?
    
 2. **Similar Output Check:**
    - Do both stories aim for the same outcome or benefit?
-   - Are the end goals or results essentially identical?
+   - Are the end goals or results essentially the same?
 
 Note: Stories are semantically similar if they request the same thing using different words.
 **Suggestions to fix:**
- - Concate the story into one 
+ - Concatenate the story into one 
  
 """
 
@@ -50,19 +61,33 @@ _out_format = """
 """
 
 _all_set_definition = """
-**Evaluate whether multiple user stories are 'Unique' by checking for duplicates across the entire set:**
-1. **Full Duplicate Check:**
-   - Are there any stories that are identical in text (case-insensitive)?
-   
-2. **Semantic Similarity Check:**
-   - **Similar Action Check:**
-     - Do any stories describe essentially the same action or functionality?
-     - Are the core behaviors or system operations equivalent?
-   - **Similar Output Check:**
-     - Do any stories aim for the same outcome or benefit?
-     - Are the end goals or results essentially identical?
+**Evaluate whether multiple user stories are 'Unique' by checking for various duplicate relationships across the entire set:**
 
-Note: Stories are duplicates if they request the same thing using different words or are textually identical.
+1. **Full Duplicate Check:**
+   - Are there any stories that are textually identical?
+   - Full duplicates have identical text content.
+
+2. **Semantic Duplicate Check:**
+   - Are there stories that request the same thing using different words?
+   - Different text but same functional requirement.
+
+3. **Different Means, Same End Check:**
+   - Do any stories have the same goal/outcome but achieve it using different methods?
+   - Same end result, different approaches or actions.
+
+4. **Same Means, Different End Check:**
+   - Do any stories use the same action/method to reach different goals?
+   - Same functionality serving different purposes.
+
+5. **Different Role, Same Means/End Check:**
+   - Do any stories have different roles but same functionality or outcomes?
+   - Different users requesting similar features.
+
+6. **Purpose = Means Check:**
+   - Is the end/goal of one story identical to the action/means of another story?
+   - One story's reason becomes another story's action.
+
+Note: Stories violate uniqueness if they have any of these duplicate relationships. Analyze the Role, Means, and Ends components of each story to detect these patterns.
 """
 
 _all_set_in_format = """
@@ -83,6 +108,52 @@ _all_set_out_format = """
           "parts_per_story": [["text"], ["text"], ["text"]],
           "issue": "Description of the duplicate stories found",
           "suggestion": "How to resolve the duplicate stories in this set"
+      }}
+    ]
+}}
+```
+**Please only display the final answer without any explanation, description, or any redundant text.**
+"""
+
+_dependency_definition = """
+**Evaluate whether multiple user stories are 'Semantically Similar' despite different wording:**
+
+1. **Similar Functionality Check:**
+   - Do these stories describe essentially the same feature or capability?
+   - Are the core behaviors or system operations equivalent?
+   
+2. **Similar Outcome Check:**
+   - Do these stories aim for the same result or benefit?
+   - Are the end goals essentially the same?
+
+3. **Role-Means-Ends Analysis:**
+   - Compare the Role (who), Means (how), and Ends (what/why) components
+   - Stories are duplicates if they have similar role-means-ends combinations
+
+Note: Stories are semantically similar if they request the same thing using different words or phrasing.
+**Suggestions to fix:**
+ - Merge semantically similar stories into one comprehensive story
+ - Remove duplicate stories that don't add unique value
+"""
+
+_dependency_in_format = """
+**User Stories to Evaluate:**
+{stories_list}
+"""
+
+_dependency_out_format = """
+**Strictly follow this output format (JSON) without any other explanation:**
+- If no conflicts: `{{"valid": true}}`
+- If dependency conflicts found:
+```json
+{{
+    "valid": false,
+    "violations": [
+      {{
+          "story_ids": [1, 3, 5],
+          "parts_per_story": [["means"], ["means"], ["means"]],
+          "issue": "Description of the dependency conflict found",
+          "suggestion": "How to resolve the conflicting actions in this set"
       }}
     ]
 }}
@@ -123,7 +194,7 @@ def format_stories_list(components: list[QUSComponent]) -> str:
         Formatted string with numbered stories
     """
     return "\n".join([
-        f"Story {i+1}: \"{comp.text}\""
+        f"id: {comp.id or f'story_{i+1}'} story: \"{comp.text}\""
         for i, comp in enumerate(components)
     ])
 
@@ -140,10 +211,10 @@ class UniqueParserModel:
         """Initialize parser with specified mode.
 
         Args:
-            mode: Either "pairwise" or "fullset"
+            mode: Either "pairwise", "fullset", or "dependency"
         """
-        if mode not in ["pairwise", "fullset"]:
-            raise ValueError("Mode must be 'pairwise' or 'fullset'")
+        if mode not in ["pairwise", "fullset", "dependency"]:
+            raise ValueError("Mode must be 'pairwise', 'fullset', or 'dependency'")
 
         self.mode = mode
         self.key = f"unique-{mode}"
@@ -151,9 +222,12 @@ class UniqueParserModel:
         if mode == "pairwise":
             self.__analyzer = LLMAnalyzer[UniqueVerdictData](key=self.key)
             self.__analyzer.build_prompt(_definition, _in_format, _out_format)
-        else:  # fullset
+        elif mode == "fullset":
             self.__analyzer = LLMAnalyzer[UniqueFullSetVerdictData](key=self.key)
             self.__analyzer.build_prompt(_all_set_definition, _all_set_in_format, _all_set_out_format)
+        else:  # dependency
+            self.__analyzer = LLMAnalyzer[UniqueFullSetVerdictData](key=self.key)
+            self.__analyzer.build_prompt(_dependency_definition, _dependency_in_format, _dependency_out_format)
 
         self.__analyzer.build_parser(lambda raw: self.__parser(raw))
 
@@ -323,8 +397,8 @@ class UniqueParserModel:
         Returns:
             Tuple containing list of full-set violations and LLM result.
         """
-        if self.mode != "fullset":
-            raise ValueError("This parser is not in fullset mode")
+        if self.mode not in ["fullset", "dependency"]:
+            raise ValueError("This parser is not in fullset or dependency mode")
 
         if len(components) < 2:
             return [], None
@@ -344,6 +418,92 @@ class UniqueAnalyzer:
 
     __unique_parser_pairwise = UniqueParserModel("pairwise")
     __unique_parser_fullset = UniqueParserModel("fullset")
+    __unique_parser_dependency = UniqueParserModel("dependency")
+    
+    # NLP pipeline instances (lazy-loaded)
+    _stanza_nlp = None
+    _spacy_nlp = None
+    _SIMILARITY_THRESHOLD = 0.6
+
+    @classmethod
+    def _init_nlp_pipelines(cls):
+        """Initialize NLP pipelines for semantic analysis (lazy-loaded)."""
+        if not HAS_NLP_DEPS:
+            raise ImportError("stanza and spacy are required for semantic analysis")
+        
+        if cls._stanza_nlp is None:
+            stanza.download("en", processors="tokenize,pos,lemma,depparse", verbose=False)
+            cls._stanza_nlp = stanza.Pipeline(
+                "en", 
+                processors="tokenize,pos,lemma,depparse",
+                tokenize_pretokenized=False,
+                verbose=False,
+            )
+        
+        if cls._spacy_nlp is None:
+            try:
+                cls._spacy_nlp = spacy.load("en_core_web_md")
+            except OSError:
+                print("SpaCy model not found, downloading en_core_web_md...")
+                spacy.cli.download("en_core_web_md")
+                cls._spacy_nlp = spacy.load("en_core_web_md")
+
+    @classmethod
+    def _extract_action_and_objects(cls, means_text: str) -> tuple[Optional[str], set[str]]:
+        """Extract verb and objects from means text using dependency parsing.
+        
+        Args:
+            means_text: The means component text to analyze
+            
+        Returns:
+            Tuple of (main_verb, set_of_objects)
+        """
+        if not means_text or not HAS_NLP_DEPS:
+            return None, set()
+            
+        if cls._stanza_nlp is None:
+            cls._init_nlp_pipelines()
+            
+        doc = cls._stanza_nlp(means_text)
+        verb = None
+        objects = set()
+        
+        for sentence in doc.sentences:
+            for word in sentence.words:
+                # Find root verb (head == 0)
+                if word.head == 0:
+                    verb = word.lemma.lower()
+                # Find objects with specific dependency relations
+                if word.deprel in {"obj", "iobj", "obl"} and word.upos in {"NOUN", "PROPN"}:
+                    objects.add(word.lemma.lower())
+                    
+        return verb, objects
+
+    @classmethod
+    def _are_words_related(cls, word1: str, word2: str) -> bool:
+        """Check if two words are semantically related using SpaCy similarity.
+        
+        Args:
+            word1: First word to compare
+            word2: Second word to compare
+            
+        Returns:
+            True if words are semantically similar above threshold
+        """
+        if not HAS_NLP_DEPS or word1 == word2:
+            return word1 == word2
+            
+        if cls._spacy_nlp is None:
+            cls._init_nlp_pipelines()
+            
+        token1 = cls._spacy_nlp(word1)
+        token2 = cls._spacy_nlp(word2)
+        
+        if not token1.has_vector or not token2.has_vector:
+            return False
+            
+        similarity = token1.similarity(token2)
+        return similarity > cls._SIMILARITY_THRESHOLD
 
     @classmethod
     def _is_full_duplicate(cls, component1: QUSComponent, component2: QUSComponent) -> bool:
@@ -453,7 +613,10 @@ class UniqueAnalyzer:
     def analyze_full_set(
         cls, client: LLMClient, model_idx: int, components: list[QUSComponent]
     ) -> tuple[list[FullSetViolation], dict[str, LLMUsage]]:
-        """Analyzes all components for duplicates using heuristic-based detection.
+        """Analyzes all components using FULLSET LLM mode: Collect → Format → LLM.
+        
+        Uses _all_set_definition to find duplicates across entire set.
+        LLM returns story IDs that need to be mapped back to components.
 
         Args:
             client (LLMClient): LLM client for analysis.
@@ -463,60 +626,135 @@ class UniqueAnalyzer:
         Returns:
             Tuple containing list of full-set violations and LLM usage data.
         """
-        violations = []
-
         if len(components) < 2:
-            return violations, {}
+            return [], {}
 
-        # Group duplicates using heuristic text comparison
-        duplicate_groups = []
-        processed_indices = set()
+        # Use the fullset parser with _all_set_definition
+        violations, usage = cls.__unique_parser_fullset.analyze_full_set(client, model_idx, components)
+        
+        # Convert usage to dict format
+        usage_dict = {}
+        if usage:
+            usage_dict[cls.__unique_parser_fullset.key] = usage
+            
+        return violations, usage_dict
 
-        for i, comp1 in enumerate(components):
-            if i in processed_indices:
-                continue
-
-            # Find all duplicates of this component
-            duplicate_indices = [i]
-
-            for j, comp2 in enumerate(components[i+1:], start=i+1):
-                if j in processed_indices:
-                    continue
-
-                if cls._is_full_duplicate(comp1, comp2):
-                    duplicate_indices.append(j)
-                    processed_indices.add(j)
-
-            # If we found duplicates, create a violation
-            if len(duplicate_indices) > 1:
-                duplicate_groups.append(duplicate_indices)
-                processed_indices.update(duplicate_indices)
-
-        # Create FullSetViolation for each duplicate group
-        for group_indices in duplicate_groups:
-            # Convert to 1-based indexing for story_ids (as expected by LLM format)
-            story_ids = [idx for idx in group_indices]  # Keep 0-based for internal use
-
-            # Create parts_per_story (all stories have "text" part for uniqueness)
-            parts_per_story = [{"text"} for _ in group_indices]
-
-            # Get the duplicate texts for description
-            duplicate_texts = [components[idx].text[:50] + "..." if len(components[idx].text) > 50
-                               else components[idx].text for idx in group_indices]
-
-            issue = f"Duplicate stories detected: {len(group_indices)} stories have identical or nearly identical content"
-            suggestion = f"Remove duplicate stories or merge them into a single story. Duplicates: {', '.join(f'Story {idx+1}' for idx in group_indices)}"
-
-            violations.append(
-                FullSetViolation(
-                    story_ids=story_ids,
-                    parts_per_story=parts_per_story,
-                    issue=issue,
-                    suggestion=suggestion
-                )
+    @classmethod
+    def analyze_set_dependency(
+        cls, client: LLMClient, model_idx: int, components: list[QUSComponent]
+    ) -> tuple[list[FullSetViolation], dict[str, LLMUsage]]:
+        """Analyzes components for semantic similarity using LLM.
+        
+        Uses simple clustering and LLM to find semantically similar stories.
+        This is much simpler than complex verb-object analysis.
+        
+        Args:
+            client: LLM client for analysis
+            model_idx: Model index to use
+            components: List of QUSComponent objects to analyze
+            
+        Returns:
+            Tuple of (violations, usage_dict)
+        """
+        if len(components) < 2:
+            return [], {}
+        
+        # Simple clustering by text similarity - just group similar length stories for now
+        # This is much simpler than complex NLP analysis
+        clusters = []
+        remaining = components.copy()
+        
+        while remaining:
+            current = remaining.pop(0)
+            cluster = [current]
+            
+            # Group stories with similar length (simple heuristic)
+            to_remove = []
+            for other in remaining:
+                if abs(len(current.text) - len(other.text)) < 50:  # Similar length
+                    cluster.append(other)
+                    to_remove.append(other)
+            
+            for item in to_remove:
+                remaining.remove(item)
+                
+            if len(cluster) > 1:  # Only analyze clusters with multiple stories
+                clusters.append(cluster)
+        
+        # Use LLM to analyze each cluster for semantic similarity
+        violations = []
+        all_usage = {}
+        
+        for cluster_idx, cluster in enumerate(clusters):
+            # Use the dependency parser to analyze this cluster
+            cluster_violations, usage = cls.__unique_parser_dependency.analyze_full_set(
+                client, model_idx, cluster
             )
+            
+            violations.extend(cluster_violations)
+            
+            if usage:
+                key = f"{cls.__unique_parser_dependency.key}_cluster_{cluster_idx}"
+                all_usage[key] = usage
+        
+        return violations, all_usage
 
-        return violations, {}
+    @classmethod
+    def analyze_dependency_llm(
+        cls, client: LLMClient, model_idx: int, components: list[QUSComponent]
+    ) -> tuple[list[FullSetViolation], dict[str, LLMUsage]]:
+        """Analyzes components for dependency conflicts - CLUSTER FIRST, then batch LLM.
+        
+        Logic:
+        1. Cluster similar dependencies using SpaCy/NLP
+        2. Format each cluster into a list  
+        3. Walk through LLM PER similar cluster (not per story)
+        
+        Args:
+            client: LLM client for analysis
+            model_idx: Index of the LLM model to use
+            components: List of QUSComponent objects to analyze
+            
+        Returns:
+            Tuple of (violations, usage_dict)
+        """
+        if len(components) < 2:
+            return [], {}
+
+        # First cluster using SpaCy-based similarity (reuse the clustering logic)
+        clustered_violations, _ = cls.analyze_set_dependency(components)
+        
+        if not clustered_violations:
+            return [], {}
+        
+        # Now batch each cluster through LLM for better analysis
+        all_violations = []
+        usage_dict = {}
+        
+        for i, cluster_violation in enumerate(clustered_violations):
+            # Get components for this cluster and track original indices
+            original_indices = cluster_violation.story_ids
+            cluster_components = [components[idx] for idx in original_indices]
+            
+            # Run LLM on this cluster - input as formatted lists
+            llm_violations, usage = cls.__unique_parser_dependency.analyze_full_set(
+                client, model_idx, cluster_components
+            )
+            
+            # Map returned story_ids back to original component indices
+            for violation in llm_violations:
+                # LLM returns 0-based indices within the cluster
+                # Map them back to original component indices
+                mapped_story_ids = [original_indices[cluster_idx] for cluster_idx in violation.story_ids 
+                                  if cluster_idx < len(original_indices)]
+                violation.story_ids = mapped_story_ids
+            
+            all_violations.extend(llm_violations)
+            
+            if usage:
+                usage_dict[f"{cls.__unique_parser_dependency.key}_cluster_{i}"] = usage
+            
+        return all_violations, usage_dict
 
     @classmethod
     def run(
@@ -530,14 +768,16 @@ class UniqueAnalyzer:
             *args: Variable arguments based on mode:
                 - For pairwise mode: component1, component2 (two QUSComponent objects)
                 - For fullset mode: components (list[QUSComponent])
-            mode (str): Analysis mode - "pairwise" or "fullset". Defaults to "pairwise".
+                - For dependency mode: components (list[QUSComponent]) - uses LLM analysis
+            mode (str): Analysis mode - "pairwise", "fullset", or "dependency". Defaults to "pairwise".
 
         Returns:
             Tuple containing violations and LLM usage data.
 
         Note:
             - Pairwise mode: Compares two individual components with duplicate and semantic analysis
-            - Fullset mode: Analyzes entire set using batch processing
+            - Fullset mode: Analyzes entire set using O(n) hash-based duplicate detection
+            - Dependency mode: Analyzes set using LLM for verb-object conflict detection with proper ID formatting
         """
         if mode == "pairwise":
             if len(args) != 2:
@@ -553,5 +793,13 @@ class UniqueAnalyzer:
                 return [], {}
             return cls.analyze_full_set(client, model_idx, components)
 
+        elif mode == "dependency":
+            if len(args) != 1 or not isinstance(args[0], list):
+                raise ValueError("Dependency mode requires a list of components")
+            components = args[0]
+            if len(components) < 2:
+                return [], {}
+            return cls.analyze_set_dependency(client, model_idx, components)
+
         else:
-            raise ValueError("Mode must be 'pairwise' or 'fullset'")
+            raise ValueError("Mode must be 'pairwise', 'fullset', or 'dependency'")

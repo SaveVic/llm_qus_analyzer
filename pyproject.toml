@@ -18,6 +18,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.0",
     "langchain-together>=0.3.0",
+    "langchain-openai>=0.1.0",
+    "langchain-deepseek>=0.1.0",
     "stanza>=1.10.0"
 ]
 

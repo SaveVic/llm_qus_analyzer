@@ -18,14 +18,15 @@ class LLMModelInfo:
 
     name: str
     """The display name of the LLM."""
-
+    source:str 
+    """source of the llm"""
 
 @dataclass
 class Configuration:
     """Stores configuration settings for the LLM application."""
-
-    api_key: str | None = None
-    """The API key for accessing LLM services (optional)."""
+    # Dihapus karena sudah tanpa meggunakan  apikey langchain sudah otomatis mengambil 
+    # api_key: str | None = None
+    # """The API key for accessing LLM services (optional)."""
 
     llm_models: list[LLMModelInfo] = field(default_factory=lambda: [])
     """List of available LLM models (defaults to empty list)."""
@@ -86,7 +87,7 @@ class Settings:
                     for model in model_list:
                         if isinstance(model, dict):
                             if "id" in model and "name" in model:
-                                models.append(LLMModelInfo(model["id"], model["name"]))
+                                models.append(LLMModelInfo(model["id"], model["name"],model['source']))
             if len(models) > 0:
                 self.__config.llm_models = deepcopy(models)
         else:
